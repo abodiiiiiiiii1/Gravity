@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 const DB_FILE = path.join(__dirname, 'db.json');
 
 // ── Seed database if not exists ──────────────────────────────────────────────
