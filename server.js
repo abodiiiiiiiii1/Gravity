@@ -92,6 +92,11 @@ const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (method === 'OPTIONS') { send(res, 200, {}); return; }
 
+  // GET / — healthcheck / root ping (Railway and similar hosts probe this)
+  if (method === 'GET' && parts.length === 0) {
+    send(res, 200, { status: 'ok', service: 'gravity-pos-server' }); return;
+  }
+
   const db = readDB();
 
   // GET /db — full database snapshot
