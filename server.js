@@ -211,22 +211,16 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'Not found' });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-
+server.listen(PORT, () => {
   console.log(`
-
 ╔═══════════════════════════════════════╗
-
 ║         GRAVITY POS — SERVER          ║
-
 ║  Shared Database Node  •  Port ${PORT}   ║
-
 ╚═══════════════════════════════════════╝
-
   → http://localhost:${PORT}/db
-
   → Database: ${DB_FILE}
 
-  `);
-
+  Point all store terminals to:
+  https://<your-railway-domain>
+`);
 });
