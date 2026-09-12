@@ -211,16 +211,22 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'Not found' });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
+
   console.log(`
+
 ╔═══════════════════════════════════════╗
+
 ║         GRAVITY POS — SERVER          ║
+
 ║  Shared Database Node  •  Port ${PORT}   ║
+
 ╚═══════════════════════════════════════╝
+
   → http://localhost:${PORT}/db
+
   → Database: ${DB_FILE}
-  
-  Point all store terminals to:
-  http://<this-machine-ip>:${PORT}
-`);
+
+  `);
+
 });
