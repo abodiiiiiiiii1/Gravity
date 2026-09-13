@@ -4,23 +4,37 @@
  */
 
 const http = require('http');
-const fs = require('fs');
-const fsp = require('fs').promises;
+const fs   = require('fs');
+const fsp  = require('fs').promises;
 const path = require('path');
 
 const PORT = process.env.PORT || 4000;
-const DB_FILE = path.join(__dirname, 'db.json');
+
+// ── DB path ───────────────────────────────────────────────────────────────────
+// On ephemeral platforms (Railway, Render, Fly) the app directory resets on
+// every deploy/restart, so db.json written next to server.js is lost.
+//
+// Fix: set DB_PATH to a mounted persistent-volume path in your platform's
+// environment variables, e.g.:
+//   Railway  → Settings → Variables → DB_PATH = /data/db.json
+//   Render   → Environment → DB_PATH = /var/data/db.json
+//   Fly.io   → fly.toml [env] DB_PATH = /data/db.json
+//
+// Locally, DB_PATH is unset so it falls back to db.json next to server.js.
+const DB_FILE = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(__dirname, 'db.json');
 
 // ── In-memory DB + write queue (prevents event-loop blocking) ─────────────────
-let dbCache = null;
+let dbCache     = null;
 let writeQueued = false;
 
 const SEED = {
   meta: { version: 1, lastSync: new Date().toISOString() },
   stores: [
-    { id: 'store-001', name: 'Gravity — Mayfair', location: 'London, UK' },
+    { id: 'store-001', name: 'Gravity — Mayfair',    location: 'London, UK'    },
     { id: 'store-002', name: 'Gravity — 5th Avenue', location: 'New York, USA' },
-    { id: 'store-003', name: 'Gravity — Ginza', location: 'Tokyo, JP' }
+    { id: 'store-003', name: 'Gravity — Ginza',      location: 'Tokyo, JP'     }
   ],
   products: [
     { id: 'p001', sku: 'GRV-001', name: 'Obsidian Tote',       category: 'Bags',        price: 2800, cost: 820,  stock: 12, image: '🖤' },
@@ -52,6 +66,10 @@ const SEED = {
 
 // ── Load DB into memory on startup ────────────────────────────────────────────
 async function initDB() {
+  // Ensure the directory for DB_FILE exists (important for volume paths like /data/)
+  const dir = path.dirname(DB_FILE);
+  await fsp.mkdir(dir, { recursive: true });
+
   try {
     const raw = await fsp.readFile(DB_FILE, 'utf8');
     dbCache = JSON.parse(raw);
@@ -103,15 +121,15 @@ function parseBody(req) {
 
 // ── Router ────────────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const parts = url.pathname.split('/').filter(Boolean);
+  const url    = new URL(req.url, `http://localhost:${PORT}`);
+  const parts  = url.pathname.split('/').filter(Boolean);
   const method = req.method;
 
   if (method === 'OPTIONS') { send(res, 200, {}); return; }
 
   // GET / — healthcheck
   if (method === 'GET' && parts.length === 0) {
-    send(res, 200, { status: 'ok', service: 'gravity-pos-server' }); return;
+    send(res, 200, { status: 'ok', service: 'gravity-pos-server', db: DB_FILE }); return;
   }
 
   const db = dbCache;
@@ -122,17 +140,45 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /products
-  if (method === 'GET' && parts[0] === 'products') {
+  if (method === 'GET' && parts[0] === 'products' && !parts[1]) {
     send(res, 200, db.products); return;
   }
 
+  // POST /products
+  if (method === 'POST' && parts[0] === 'products') {
+    const body = await parseBody(req);
+    const product = { id: `p${Date.now()}`, ...body };
+    db.products.push(product);
+    scheduleWrite();
+    send(res, 201, product); return;
+  }
+
+  // PUT /products/:id
+  if (method === 'PUT' && parts[0] === 'products' && parts[1]) {
+    const body = await parseBody(req);
+    const idx = db.products.findIndex(p => p.id === parts[1]);
+    if (idx === -1) { send(res, 404, { error: 'Not found' }); return; }
+    db.products[idx] = { ...db.products[idx], ...body };
+    scheduleWrite();
+    send(res, 200, db.products[idx]); return;
+  }
+
+  // DELETE /products/:id
+  if (method === 'DELETE' && parts[0] === 'products' && parts[1]) {
+    const before = db.products.length;
+    db.products = db.products.filter(p => p.id !== parts[1]);
+    if (db.products.length === before) { send(res, 404, { error: 'Not found' }); return; }
+    scheduleWrite();
+    send(res, 200, { deleted: parts[1] }); return;
+  }
+
   // GET /customers
-  if (method === 'GET' && parts[0] === 'customers') {
+  if (method === 'GET' && parts[0] === 'customers' && !parts[1]) {
     const q = url.searchParams.get('q');
     const list = q
       ? db.customers.filter(c =>
           c.name.toLowerCase().includes(q.toLowerCase()) ||
-          c.email.toLowerCase().includes(q.toLowerCase()))
+          (c.email || '').toLowerCase().includes(q.toLowerCase()))
       : db.customers;
     send(res, 200, list); return;
   }
@@ -146,8 +192,27 @@ const server = http.createServer(async (req, res) => {
     send(res, 201, customer); return;
   }
 
+  // PUT /customers/:id
+  if (method === 'PUT' && parts[0] === 'customers' && parts[1]) {
+    const body = await parseBody(req);
+    const idx = db.customers.findIndex(c => c.id === parts[1]);
+    if (idx === -1) { send(res, 404, { error: 'Not found' }); return; }
+    db.customers[idx] = { ...db.customers[idx], ...body };
+    scheduleWrite();
+    send(res, 200, db.customers[idx]); return;
+  }
+
+  // DELETE /customers/:id
+  if (method === 'DELETE' && parts[0] === 'customers' && parts[1]) {
+    const before = db.customers.length;
+    db.customers = db.customers.filter(c => c.id !== parts[1]);
+    if (db.customers.length === before) { send(res, 404, { error: 'Not found' }); return; }
+    scheduleWrite();
+    send(res, 200, { deleted: parts[1] }); return;
+  }
+
   // GET /transactions
-  if (method === 'GET' && parts[0] === 'transactions') {
+  if (method === 'GET' && parts[0] === 'transactions' && !parts[1]) {
     const storeId = url.searchParams.get('storeId');
     const list = storeId
       ? db.transactions.filter(t => t.storeId === storeId)
@@ -172,7 +237,7 @@ const server = http.createServer(async (req, res) => {
       const customer = db.customers.find(c => c.id === txn.customerId);
       if (customer) {
         customer.totalSpend += txn.total || 0;
-        customer.visits += 1;
+        customer.visits     += 1;
         if (customer.totalSpend > 50000)      customer.tier = 'Obsidian';
         else if (customer.totalSpend > 20000) customer.tier = 'Noir';
       }
@@ -182,14 +247,13 @@ const server = http.createServer(async (req, res) => {
     send(res, 201, txn); return;
   }
 
-  // PUT /products/:id
-  if (method === 'PUT' && parts[0] === 'products' && parts[1]) {
-    const body = await parseBody(req);
-    const idx = db.products.findIndex(p => p.id === parts[1]);
-    if (idx === -1) { send(res, 404, { error: 'Not found' }); return; }
-    db.products[idx] = { ...db.products[idx], ...body };
+  // DELETE /transactions/:id
+  if (method === 'DELETE' && parts[0] === 'transactions' && parts[1]) {
+    const before = db.transactions.length;
+    db.transactions = db.transactions.filter(t => t.id !== parts[1]);
+    if (db.transactions.length === before) { send(res, 404, { error: 'Not found' }); return; }
     scheduleWrite();
-    send(res, 200, db.products[idx]); return;
+    send(res, 200, { deleted: parts[1] }); return;
   }
 
   // GET /stores
@@ -207,17 +271,17 @@ const server = http.createServer(async (req, res) => {
 
   // GET /dashboard
   if (method === 'GET' && parts[0] === 'dashboard') {
-    const today = new Date().toDateString();
+    const today    = new Date().toDateString();
     const todayTxns = db.transactions.filter(t => new Date(t.timestamp).toDateString() === today);
-    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    const weekAgo  = new Date(Date.now() - 7 * 86400000);
     const weekTxns = db.transactions.filter(t => new Date(t.timestamp) >= weekAgo);
     send(res, 200, {
-      todaySales: todayTxns.reduce((s, t) => s + (t.total || 0), 0),
+      todaySales:        todayTxns.reduce((s, t) => s + (t.total || 0), 0),
       todayTransactions: todayTxns.length,
-      weekSales: weekTxns.reduce((s, t) => s + (t.total || 0), 0),
-      totalCustomers: db.customers.length,
-      lowStock: db.products.filter(p => p.stock < 5),
-      topProducts: db.products.slice(0, 5)
+      weekSales:         weekTxns.reduce((s, t) => s + (t.total || 0), 0),
+      totalCustomers:    db.customers.length,
+      lowStock:          db.products.filter(p => p.stock < 5),
+      topProducts:       db.products.slice(0, 5)
     });
     return;
   }
@@ -235,6 +299,7 @@ initDB().then(() => {
 ╚═══════════════════════════════════════╝
   → http://localhost:${PORT}/db
   → Database: ${DB_FILE}
+  ${process.env.DB_PATH ? '  ✦ Using persistent volume path' : '  ⚠  DB_PATH not set — data will reset on redeploy'}
 
   Point all store terminals to:
   https://<your-railway-domain>
